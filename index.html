@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<title>能量臨界:六角防線 — Demo</title>
+<style>
+  body { margin:0; background:#10141c; color:#dfe6f0; font-family:"Segoe UI",sans-serif; user-select:none; }
+  #wrap { display:flex; flex-direction:column; align-items:center; padding:8px; }
+  canvas { background:#0b0e14; border:1px solid #2a3242; border-radius:8px; cursor:crosshair; }
+  #topbar { display:flex; gap:24px; align-items:center; margin-bottom:6px; font-size:15px; }
+  .hp { font-weight:bold; }
+  #phase { color:#ffd54f; font-weight:bold; }
+  #toolbar { display:flex; gap:6px; margin-top:8px; flex-wrap:wrap; justify-content:center; }
+  button { background:#1c2433; color:#dfe6f0; border:1px solid #3a4660; border-radius:6px; padding:8px 12px; cursor:pointer; font-size:13px; }
+  button:hover { background:#27324a; }
+  button.sel { background:#3b5cad; border-color:#6e8fe0; }
+  button:disabled { opacity:0.4; cursor:default; }
+  #msg { height:20px; margin-top:6px; font-size:13px; color:#9fb4d8; }
+  #squad { margin-top:8px; font-size:14px; color:#cfe3a8; background:#161d2b;
+           border:1px solid #2a3242; border-radius:6px; padding:6px 14px; }
+  #synbook { margin-top:6px; display:flex; gap:8px; flex-wrap:wrap; justify-content:center; }
+  .syn { font-size:12px; padding:4px 10px; border-radius:12px; border:1px solid #2a3242;
+         background:#141b29; color:#7d8aa3; }
+  .syn b { color:#9fb4d8; }
+  .syn.on { border-color:#7fe3a8; background:#1c3326; color:#cfe3a8; }
+  .syn.on b { color:#7fe3a8; }
+  #energy { color:#7fe3a8; font-weight:bold; }
+  #panel { margin-top:8px; background:#161d2b; border:1px solid #2a3242; border-radius:8px;
+           padding:8px 14px; display:flex; gap:18px; flex-wrap:wrap; font-size:12px; color:#9fb4d8; }
+  #panel label { display:flex; flex-direction:column; gap:2px; align-items:center; }
+  #panel input[type=range] { width:110px; }
+  #panel .val { color:#ffd54f; font-weight:bold; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="topbar">
+    <span class="hp" style="color:#6ea8ff">我方主堡: <span id="pHP">100</span></span>
+    <span id="energy">源能: 100</span>
+    <span id="phase">佈局階段</span>
+    <span class="hp" style="color:#ff7a7a">敵方主堡: <span id="eHP">100</span></span>
+  </div>
+  <canvas id="cv" width="920" height="500"></canvas>
+  <div id="toolbar"></div>
+  <div id="squad">🏕 待命區:(空)</div>
+  <div id="synbook"></div>
+  <div id="msg"></div>
+  <div id="panel"></div>
+</div>
+<script>
+"use strict";
+//==================== 基本參數 ====================
+const COLS=15, ROWS=9, HEX=34;
+const E_START=100, E_CAP=300, BASE_HP=100;
+const SETUP_BLOCKS=8;
+// 可即時調整的設計參數(畫面下方滑桿)
+const CFG={
+  regen:5,        // 源能回復/秒
+  bounty:0.30,    // 懸賞比例(怪被擊殺,擊殺方拿回造價的比例)
+  inflate:0.15,   // 塔價通膨:每擁有一座塔,下一座加價 15%(反龜縮機制)
+  aiAggro:1.0,    // AI 行動頻率倍率
+  setupBlocks:8,  // 佈局階段每方的免費地形數
+  extraCost:15,   // 超過免費額度後,每塊地形扣多少開局源能
+  creepScale:0.10,// 怪物時間成長:每分鐘血量/傷害 +10%(反後期塔海僵局)
+};
+// 主動技能:過載脈衝(點地圖施放,範圍減速+傷害)
+const PULSE={cd:25,radius:110,dur:2.5,dmg:10};
+const REFRESH_COST=20; // 刷新整手牌的費用
+// 賽前地形(都會擋路,像棋子一樣拚出地圖)
+const SETUP_TILES={
+  block: {name:"障礙地板",sym:"",  desc:"可蓋塔,塔傷害+25%(羈絆)"},
+  energy:{name:"資源地板",sym:"◈", desc:"每秒+0.5源能,不可蓋塔"},
+  high:  {name:"高台地板",sym:"▲", desc:"可蓋塔,塔射程+25%"},
+};
+// 地板卡定義(塔在 TOWERS、怪在 CREEPS)
+const TILES={
+  slowtile:{name:"緩速地板",cost:30},
+  block:   {name:"障礙地板",cost:25},
+};
+// 抽卡權重(Rogue-lite 手牌池:怪/塔/地板 全部入池)
+const DECK=[
+  ['creep','fast',16],['creep','mid',13],['creep','tank',11],['creep','wing',8],['creep','titan',5],
+  ['tower','rapid',9],['tower','slow',7],['tower','heavy',6],['tower','splash',5],['tower','sniper',4],
+  ['tile','slowtile',6],['tile','block',5],
+];
+function drawCard(){
+  let total=DECK.reduce((s,[,,w])=>s+w,0), roll=Math.random()*total;
+  for(const [kind,id,w] of DECK){ if((roll-=w)<0) return {kind,id}; }
+  return {kind:'creep',id:'fast'};
+}
+function cardLabel(cd){
+  if(cd.kind==='creep') return `🎴 ${CREEPS[cd.id].name} ${CREEPS[cd.id].cost}`;
+  if(cd.kind==='tower') return `🗼 ${TOWERS[cd.id].name} ${towerCost(cd.id,'P')}`;
+  return `⬢ ${TILES[cd.id].name} ${TILES[cd.id].cost}`;
+}
+// 羈絆定義(出擊時依小隊組成結算)
+const SYNERGIES=[
+  {name:'疾風陣',  need:{fast:3},        effect:'全隊速度+25%',        apply:o=>o.spdMul*=1.25},
+  {name:'鐵壁陣',  need:{tank:3},        effect:'全隊血量+30%',        apply:o=>o.hpMul*=1.3},
+  {name:'葫蘆小隊',need:{fast:3,tank:3}, effect:'懸賞減半(對手只拿一半)',apply:o=>o.bountyMul*=0.5},
+  {name:'空襲編隊',need:{wing:2},        effect:'全隊血量+20%',        apply:o=>o.hpMul*=1.2},
+];
+function computeSynergy(staged){
+  const cnt={}; staged.forEach(t=>cnt[t]=(cnt[t]||0)+1);
+  const out={hpMul:1,spdMul:1,bountyMul:1,names:[]};
+  for(const s of SYNERGIES){
+    if(Object.entries(s.need).every(([t,n])=>(cnt[t]||0)>=n)){
+      s.apply(out); out.names.push(s.name);
+    }
+  }
+  return out;
+}
+const TOWERS={
+  rapid: {name:"速射塔",cost:40,dmg:6, rate:0.35,range:95, color:"#5ad1e6"},
+  heavy: {name:"重炮塔",cost:70,dmg:30,rate:1.4, range:120,color:"#e6a05a"},
+  slow:  {name:"緩速塔",cost:50,dmg:4, rate:0.6, range:100,color:"#b48ae6",slow:0.5,slowDur:1.2},
+  splash:{name:"爆裂塔",cost:85,dmg:16,rate:1.0, range:95, color:"#ff8a5c",aoe:48},
+  sniper:{name:"狙擊塔",cost:90,dmg:60,rate:2.4, range:200,color:"#ffd54f"},
+};
+const CREEPS={
+  fast:{name:"迅捷獸",cost:30, hp:60, speed:95,dmg:8, color:"#8de68a",r:7},
+  mid: {name:"均衡獸",cost:50, hp:150,speed:65,dmg:12,color:"#e6dd6a",r:9},
+  tank:{name:"重裝獸",cost:80, hp:320,speed:42,dmg:20,color:"#e66a6a",r:11},
+  wing:{name:"飛翼獸",cost:70, hp:100,speed:75,dmg:10,color:"#9adfff",r:8, fly:true},
+  titan:{name:"泰坦獸",cost:130,hp:650,speed:36,dmg:32,color:"#e68ad2",r:13},
+};
+const SLOWTILE_COST=30;
+
+//==================== 六角格 (odd-r offset, pointy-top) ====================
+// cell: {terrain:null|'block'|'slowP'|'slowE', tower:null|{...}, base:null|'P'|'E'}
+let grid=[];
+for(let r=0;r<ROWS;r++){ grid[r]=[]; for(let c=0;c<COLS;c++) grid[r][c]={terrain:null,tower:null,base:null}; }
+const P_BASE={r:1, c:1}, E_BASE={r:ROWS-2, c:COLS-2};
+grid[P_BASE.r][P_BASE.c].base='P';
+grid[E_BASE.r][E_BASE.c].base='E';
+
+function hexCenter(r,c){
+  const w=HEX*Math.sqrt(3)/2*2; // hex width
+  const x = 30 + c*(HEX*Math.sqrt(3)) + (r%2 ? HEX*Math.sqrt(3)/2 : 0);
+  const y = 32 + r*(HEX*1.5);
+  return {x,y};
+}
+function neighbors(r,c){
+  const even=[[+1,0],[-1,0],[0,-1],[0,+1],[-1,-1],[+1,-1]];
+  const odd =[[+1,0],[-1,0],[0,-1],[0,+1],[-1,+1],[+1,+1]];
+  const dirs=(r%2)?odd:even;
+  const out=[];
+  for(const [dr,dc] of dirs){ const nr=r+dr,nc=c+dc;
+    if(nr>=0&&nr<ROWS&&nc>=0&&nc<COLS) out.push([nr,nc]); }
+  return out;
+}
+function isBlocked(r,c){ const g=grid[r][c]; if(g.base) return false;
+  return ['block','energy','high'].includes(g.terrain) || !!g.tower; }
+
+//==================== 路徑 (BFS) ====================
+let pathVersion=0;
+function bfs(from,to,ignore){ // ignore: {r,c} treated as blocked (for placement test)
+  const key=(r,c)=>r*COLS+c;
+  const prev=new Map(); const q=[[from.r,from.c]]; prev.set(key(from.r,from.c),null);
+  while(q.length){
+    const [r,c]=q.shift();
+    if(r===to.r&&c===to.c){
+      const path=[]; let k=key(r,c), cur=[r,c];
+      while(cur){ path.push({r:cur[0],c:cur[1]}); cur=prev.get(key(cur[0],cur[1])); }
+      return path.reverse();
+    }
+    for(const [nr,nc] of neighbors(r,c)){
+      const k2=key(nr,nc);
+      if(prev.has(k2)) continue;
+      if(ignore&&ignore.r===nr&&ignore.c===nc){ continue; }
+      if(isBlocked(nr,nc)) continue;
+      prev.set(k2,[r,c]); q.push([nr,nc]);
+    }
+  }
+  return null;
+}
+function placementLegal(r,c){ // 放障礙/塔後仍須雙堡連通
+  return !!bfs(P_BASE,E_BASE,{r,c});
+}
+
+//==================== 遊戲狀態 ====================
+let state={
+  phase:'setup', // setup | battle | over
+  pE:E_START, eE:E_START, pHP:BASE_HP, eHP:BASE_HP,
+  pPlaced:0,
+  setupTime:60, tool:'block', creeps:[], shots:[], winner:null,
+  hand:null, staged:[], launchQueue:[], launchTimer:0, battleStart:0,
+  pulseCd:0, ePulseCd:0, floats:[],
+};
+function addFloat(x,y,text,color){
+  state.floats.push({x,y,text,color,t:1.1});
+}
+const msg=t=>document.getElementById('msg').textContent=t;
+
+// 塔價通膨:基礎價 ×(1 + 通膨率 × 已擁有塔數)
+function towerCount(owner){
+  let n=0;
+  for(let r=0;r<ROWS;r++)for(let c=0;c<COLS;c++){
+    const tw=grid[r][c].tower;
+    if(tw&&!tw.tmp&&tw.owner===owner) n++;
+  }
+  return n;
+}
+function towerCost(type,owner){
+  return Math.round(TOWERS[type].cost*(1+CFG.inflate*towerCount(owner)));
+}
+
+//==================== 調參面板 ====================
+const PANEL_DEFS=[
+  {key:'setupBlocks',label:'免費地板數',min:0,max:24,step:1, fmt:v=>v+' 塊'},
+  {key:'extraCost',label:'超額地板費',min:5,max:40,step:5, fmt:v=>'-'+v+' 源能'},
+  {key:'bounty', label:'懸賞比例', min:0,   max:1,   step:0.05, fmt:v=>Math.round(v*100)+'%'},
+  {key:'regen',  label:'回能速度', min:1,   max:15,  step:0.5,  fmt:v=>v+'/秒'},
+  {key:'inflate',label:'塔價通膨', min:0,   max:0.5, step:0.05, fmt:v=>Math.round(v*100)+'%/座'},
+  {key:'aiAggro',label:'AI 侵略性',min:0.5, max:2.5, step:0.1,  fmt:v=>'×'+v.toFixed(1)},
+  {key:'creepScale',label:'怪物時間成長',min:0, max:0.4, step:0.02, fmt:v=>'+'+Math.round(v*100)+'%/分'},
+];
+(function buildPanel(){
+  const panel=document.getElementById('panel');
+  for(const d of PANEL_DEFS){
+    const lab=document.createElement('label');
+    const span=document.createElement('span');
+    span.innerHTML=`${d.label} <span class="val"></span>`;
+    const inp=document.createElement('input');
+    inp.type='range'; inp.min=d.min; inp.max=d.max; inp.step=d.step; inp.value=CFG[d.key];
+    const sync=()=>{ CFG[d.key]=parseFloat(inp.value); span.querySelector('.val').textContent=d.fmt(CFG[d.key]); };
+    inp.oninput=()=>{ sync(); if(d.key==='setupBlocks'&&state.phase==='setup') makeToolbar(); };
+    sync();
+    lab.appendChild(span); lab.appendChild(inp); panel.appendChild(lab);
+  }
+})();
+
+//==================== 工具列 ====================
+const toolbar=document.getElementById('toolbar');
+function makeToolbar(){
+  toolbar.innerHTML='';
+  const add=(id,label,fn)=>{ const b=document.createElement('button'); b.id='tb_'+id; b.textContent=label; b.onclick=fn; toolbar.appendChild(b); return b; };
+  if(state.phase==='setup'){
+    for(const k in SETUP_TILES) add(k,`${SETUP_TILES[k].sym?SETUP_TILES[k].sym+' ':''}${SETUP_TILES[k].name}`,()=>{ setTool(k); msg(SETUP_TILES[k].desc); });
+    add('erase','移除地板',()=>setTool('erase'));
+    add('go','✓ 完成佈局,開始戰鬥!',startBattle).style.borderColor='#7fe3a8';
+  }else if(state.phase==='battle'){
+    // 統一手牌:怪=點擊進待命區;塔/地板=選取後點地圖放置(放置才消耗)
+    state.hand.forEach((cd,i)=>{
+      const b=add('card'+i,cardLabel(cd),()=>{
+        if(cd.kind==='creep') playCard(i);
+        else setTool('card'+i);
+      });
+      b.style.borderColor=cd.kind==='creep'?'#8a6de0':(cd.kind==='tower'?'#5ad1e6':'#7fb88a');
+    });
+    const syn=computeSynergy(state.staged);
+    const synTxt=syn.names.length?' ['+syn.names.join('+')+']':'';
+    const lb=add('launch',`⚔ 出擊 (${state.staged.length})${synTxt}`,launchSquad);
+    lb.style.borderColor='#7fe3a8';
+    add('refresh',`♻ 刷新手牌 ${REFRESH_COST}`,refreshHand);
+    add('pulse','⚡ 過載脈衝',()=>{ setTool('pulse'); msg('點擊地圖施放:範圍內敵怪減速70%並受傷'); });
+  }else{
+    add('again','再來一局',()=>location.reload());
+  }
+  setTool(state.tool);
+}
+function setTool(t){ state.tool=t;
+  for(const b of toolbar.querySelectorAll('button')) b.classList.toggle('sel', b.id==='tb_'+t);
+}
+
+//==================== 佈局階段 ====================
+function setupClick(r,c){
+  const half=Math.floor(COLS/2);
+  const g=grid[r][c];
+  if(state.tool==='erase'){
+    if(SETUP_TILES[g.terrain]&&c<half){
+      g.terrain=null; g.tOwner=null;
+      state.pPlaced--;
+      if(state.pPlaced>=CFG.setupBlocks) state.pE+=CFG.extraCost; // 退回超額費
+      makeToolbar();
+    }
+    return;
+  }
+  if(!SETUP_TILES[state.tool]) return;
+  if(c>=half){ msg('只能佈置在自己半場(左半邊)'); return; }
+  if(g.base||g.terrain){ msg('這格已被佔用'); return; }
+  const isExtra=state.pPlaced>=CFG.setupBlocks;
+  if(isExtra&&state.pE<CFG.extraCost){ msg('開局源能不足,無法再加購地形'); return; }
+  g.terrain=state.tool; g.tOwner='P';
+  if(!bfs(P_BASE,E_BASE)){ g.terrain=null; g.tOwner=null; msg('不能把路完全堵死!'); return; }
+  if(isExtra){ state.pE-=CFG.extraCost; msg(`超額地形:開局源能 -${CFG.extraCost}`); }
+  state.pPlaced++; makeToolbar();
+}
+function aiSetup(){
+  // AI 在右半場沿主堡前方擺出簡單漏斗
+  let tries=0, placed=0;
+  while(placed<CFG.setupBlocks&&tries<600){
+    tries++;
+    const r=Math.floor(Math.random()*ROWS);
+    const c=COLS-2-Math.floor(Math.random()*5);
+    const g=grid[r][c];
+    if(g.base||g.terrain) continue;
+    const roll=Math.random();
+    g.terrain=roll<0.55?'block':(roll<0.8?'energy':'high');
+    g.tOwner='E';
+    if(!bfs(P_BASE,E_BASE)){ g.terrain=null; g.tOwner=null; continue; }
+    placed++;
+  }
+}
+function startBattle(){
+  if(state.phase!=='setup') return;
+  aiSetup();
+  state.phase='battle'; state.tool=''; state.battleStart=performance.now();
+  state.hand=[drawCard(),drawCard(),drawCard(),drawCard(),drawCard()];
+  pathVersion++;
+  document.getElementById('phase').textContent='⚔ 戰鬥中';
+  makeToolbar();
+  msg('戰鬥開始!蓋塔防守,或召喚怪物進攻。怪被擊殺,對方會拿到 30% 懸賞!');
+}
+
+//==================== 戰鬥階段:建造/召喚 ====================
+function refreshHand(){
+  if(state.pE<REFRESH_COST) return msg('源能不足,無法刷新');
+  state.pE-=REFRESH_COST;
+  state.hand=[drawCard(),drawCard(),drawCard(),drawCard(),drawCard()];
+  makeToolbar();
+  msg('手牌已刷新!');
+}
+function castPulse(owner,x,y){
+  const now=performance.now()/1000;
+  let hit=0;
+  for(const k of state.creeps){
+    if(k.owner===owner||k.hp<=0) continue;
+    if(Math.hypot(k.x-x,k.y-y)<=PULSE.radius){
+      k.pulseUntil=now+PULSE.dur;
+      hitCreep(k,PULSE.dmg,{owner});
+      hit++;
+    }
+  }
+  state.shots.push({pulse:true,x,y,t:0.45,color:owner==='P'?'#7fe3a8':'#ff9a7a'});
+  return hit;
+}
+function battleClick(r,c){
+  const half=Math.floor(COLS/2);
+  if(state.tool==='pulse'){
+    if(state.pulseCd>0) return msg(`脈衝冷卻中(剩 ${Math.ceil(state.pulseCd)} 秒)`);
+    const p=hexCenter(r,c);
+    const hit=castPulse('P',p.x,p.y);
+    state.pulseCd=PULSE.cd;
+    state.tool='';
+    msg(`⚡ 過載脈衝!命中 ${hit} 隻敵怪`);
+    return;
+  }
+  const m=/^card(\d)$/.exec(state.tool||'');
+  if(!m) return;
+  const slot=+m[1], card=state.hand[slot];
+  if(!card||card.kind==='creep') return;
+  const g=grid[r][c];
+  if(c>=half) return msg('只能放在自己半場');
+  if(card.kind==='tile'){
+    if(g.base||g.tower||g.terrain) return msg('這格已被佔用');
+    const cost=TILES[card.id].cost;
+    if(state.pE<cost) return msg('源能不足');
+    if(card.id==='block'){
+      g.terrain='block';
+      if(!bfs(P_BASE,E_BASE)){ g.terrain=null; return msg('不能把路完全堵死!'); }
+      pathVersion++;
+      msg('障礙地板放置!可以在上面蓋塔吃羈絆加成');
+    }else{
+      g.terrain='slowP';
+      msg('緩速地板放置!敵方怪經過減速 50%');
+    }
+    state.pE-=cost;
+  }else{ // tower
+    if(g.base||g.tower) return msg('這格已有建築');
+    if(g.terrain==='slowP'||g.terrain==='slowE') return msg('效果地板上不能蓋塔');
+    if(g.terrain==='energy') return msg('資源地板上不能蓋塔');
+    const cost=towerCost(card.id,'P');
+    if(state.pE<cost) return msg(`源能不足(目前造價 ${cost},塔越多越貴)`);
+    const onBlock=g.terrain==='block', onHigh=g.terrain==='high';
+    if(!onBlock&&!onHigh){
+      g.tower={tmp:true};
+      const ok=!!bfs(P_BASE,E_BASE);
+      g.tower=null;
+      if(!ok) return msg('不能把路完全堵死!');
+    }
+    state.pE-=cost;
+    g.tower={type:card.id,owner:'P',cd:0,buff:onBlock?1.25:1,rangeMul:onHigh?1.25:1};
+    pathVersion++;
+    if(onBlock) msg('羈絆!蓋在障礙地板上的塔 傷害+25%');
+    if(onHigh) msg('高台加成!塔射程+25%');
+  }
+  state.hand[slot]=drawCard(); // 用掉的卡消失,抽新卡
+  state.tool='';
+  makeToolbar();
+}
+function playCard(i){
+  const t=state.hand[i].id, C=CREEPS[t];
+  if(state.pE<C.cost) return msg('源能不足');
+  state.pE-=C.cost;
+  state.staged.push(t);
+  state.hand[i]=drawCard();
+  makeToolbar();
+  const syn=computeSynergy(state.staged);
+  msg(syn.names.length?`羈絆成形:${syn.names.join('+')}!按「出擊」放出小隊`:`${C.name} 進入待命區(錢已付,死了對手照拿懸賞,想好再出擊)`);
+}
+function launchSquad(){
+  if(!state.staged.length) return msg('待命區是空的,先打出手牌');
+  const mods=computeSynergy(state.staged);
+  for(const t of state.staged) state.launchQueue.push({type:t,mods});
+  state.staged=[];
+  makeToolbar();
+  msg(mods.names.length?`出擊!羈絆生效:${mods.names.join('+')}`:'小隊出擊!');
+}
+function summon(owner,type,mods,paid){
+  const C=CREEPS[type];
+  if(!paid){
+    const ePool=owner==='P'?'pE':'eE';
+    if(state[ePool]<C.cost){ if(owner==='P') msg('源能不足'); return; }
+    state[ePool]-=C.cost;
+  }
+  mods=mods||{hpMul:1,spdMul:1,bountyMul:1};
+  // 時間成長:開戰越久,怪越強(雙方適用),確保後期必能破防
+  const elapsed=state.battleStart?(performance.now()-state.battleStart)/60000:0;
+  const tMul=1+CFG.creepScale*elapsed;
+  const from=owner==='P'?P_BASE:E_BASE, to=owner==='P'?E_BASE:P_BASE;
+  const path=C.fly?[from,to]:bfs(from,to); // 飛行怪直線飛越,無視迷宮
+  if(!path) return;
+  const p0=hexCenter(from.r,from.c);
+  const hp=Math.round(C.hp*tMul*(mods.hpMul||1));
+  state.creeps.push({owner,type,hp,maxhp:hp,x:p0.x,y:p0.y,
+    dmg:Math.round(C.dmg*tMul),spdMul:mods.spdMul||1,bountyMul:mods.bountyMul||1,
+    path,idx:1,slowUntil:0,ver:pathVersion,from,to,fly:!!C.fly});
+}
+
+//==================== AI(威脅評估版) ====================
+let aiTimer=0, aiWaveQueue=[], aiLossScore=0;
+function countTowersNear(path,owner){ // 路徑沿線、射程涵蓋得到的塔數
+  if(!path) return 0;
+  let n=0;
+  const pts=path.map(p=>hexCenter(p.r,p.c));
+  for(let r=0;r<ROWS;r++)for(let c=0;c<COLS;c++){
+    const tw=grid[r][c].tower; if(!tw||tw.tmp||tw.owner!==owner) continue;
+    const p=hexCenter(r,c), rg=TOWERS[tw.type].range;
+    if(pts.some(q=>Math.hypot(q.x-p.x,q.y-p.y)<=rg)) n++;
+  }
+  return n;
+}
+function composeWave(pDef){ // 依對方防線強度決定波次組成
+  if(pDef<=1) return ['fast','fast','mid'];                    // 防線空虛 → 快攻
+  if(pDef<=3) return ['tank','mid','fast','fast'];             // 重裝開路
+  if(Math.random()<0.45) return ['wing','wing','tank','mid'];  // 防線厚 → 飛行繞過迷宮
+  return ['titan','tank','mid','fast'];                        // 或泰坦硬鑿
+}
+function aiThink(dt){
+  aiTimer-=dt; if(aiTimer>0) return; aiTimer=1.0/CFG.aiAggro;
+  aiLossScore=Math.max(0,aiLossScore-0.15); // 損失記憶隨時間淡化
+  const e=state.eE;
+  // 1. 正在出波 → 依序送出(湊一波集中衝,而非零星送頭)
+  if(aiWaveQueue.length){
+    const t=aiWaveQueue[0];
+    if(CREEPS[t].cost<=e){ summon('E',t); aiWaveQueue.shift(); }
+    return;
+  }
+  // 2. 防守:評估場上玩家怪的總血量威脅
+  const threat=state.creeps.filter(k=>k.owner==='P').reduce((s,k)=>s+k.hp,0);
+  // 大軍壓到家門口 → AI 也會丟脈衝
+  if(threat>200&&state.ePulseCd<=0){
+    const bp=hexCenter(E_BASE.r,E_BASE.c);
+    const nearBase=state.creeps.some(k=>k.owner==='P'&&Math.hypot(k.x-bp.x,k.y-bp.y)<=PULSE.radius);
+    if(nearBase){ castPulse('E',bp.x,bp.y); state.ePulseCd=PULSE.cd; }
+  }
+  const myDef=countTowersNear(bfs(P_BASE,E_BASE),'E');
+  if(threat>100 && myDef<2+threat/200){
+    if(aiBuildTower()) return;
+  }
+  // 3. 大軍壓境時補緩速地板拖時間
+  if(threat>250 && e>=SLOWTILE_COST+50 && Math.random()<0.5){
+    if(aiPlaceSlowTile()) return;
+  }
+  // 4. 進攻:看玩家防線厚度決定要攢多少錢、出什麼波
+  //    被收過懸賞會提高攢錢門檻(更謹慎)
+  const pDef=countTowersNear(bfs(E_BASE,P_BASE),'P');
+  const saveTarget=Math.min(E_CAP-20, 70+pDef*40+aiLossScore*35);
+  if(e>=saveTarget){ aiWaveQueue=composeWave(pDef); return; }
+  // 5. 錢快滿了卻沒事做 → 補防線,別讓源能溢出
+  if(e>=E_CAP*0.8) aiBuildTower();
+}
+function aiPlaceSlowTile(){
+  const path=bfs(P_BASE,E_BASE); if(!path) return false;
+  const half=Math.floor(COLS/2);
+  const cand=path.filter(p=>p.c>=half&&!grid[p.r][p.c].base&&!grid[p.r][p.c].terrain&&!grid[p.r][p.c].tower);
+  if(!cand.length) return false;
+  const p=cand[Math.floor(Math.random()*cand.length)];
+  grid[p.r][p.c].terrain='slowE'; state.eE-=SLOWTILE_COST;
+  return true;
+}
+function aiBuildTower(){
+  // 沿玩家進攻路徑評分選位:優先障礙地板(羈絆+25%)、覆蓋越多路徑格越好
+  const path=bfs(P_BASE,E_BASE); if(!path) return false;
+  const half=Math.floor(COLS/2);
+  const pathPts=path.filter(p=>p.c>=half).map(p=>hexCenter(p.r,p.c));
+  if(!pathPts.length) return false;
+  const cands=new Map();
+  for(const p of path){
+    if(p.c<half) continue;
+    for(const [r,c] of neighbors(p.r,p.c)){
+      const g=grid[r][c];
+      if(c<half||g.base||g.tower||g.terrain==='slowE'||g.terrain==='slowP'||g.terrain==='energy') continue;
+      cands.set(r*COLS+c,{r,c});
+    }
+  }
+  let best=null,bs=-1;
+  for(const cell of cands.values()){
+    const g=grid[cell.r][cell.c], p=hexCenter(cell.r,cell.c);
+    let s=pathPts.filter(q=>Math.hypot(q.x-p.x,q.y-p.y)<=105).length;
+    if(g.terrain==='block') s+=3; // 羈絆位優先
+    if(g.terrain==='high') s+=2;  // 高台次之
+    if(s>bs){ bs=s; best=cell; }
+  }
+  if(!best) return false;
+  const g=grid[best.r][best.c];
+  const onBlock=g.terrain==='block', onHigh=g.terrain==='high';
+  if(!onBlock&&!onHigh){ g.tower={tmp:true}; const ok=!!bfs(P_BASE,E_BASE); g.tower=null; if(!ok) return false; }
+  // 選塔:偏好爆裂/重炮打群,偶爾補緩速;買得起最貴的優先
+  const prefer=Math.random()<0.3?['slow','splash','rapid']:['splash','heavy','sniper','rapid','slow'];
+  const pick=prefer.find(t=>towerCost(t,'E')<=state.eE);
+  if(!pick) return false;
+  state.eE-=towerCost(pick,'E');
+  g.tower={type:pick,owner:'E',cd:0,buff:onBlock?1.25:1,rangeMul:onHigh?1.25:1};
+  pathVersion++;
+  return true;
+}
+
+//==================== 模擬 ====================
+function update(dt){
+  if(state.phase==='setup'){
+    state.setupTime-=dt;
+    document.getElementById('phase').textContent=`佈局階段 ${Math.ceil(state.setupTime)}s`;
+    const freeLeft=Math.max(0,CFG.setupBlocks-state.pPlaced);
+    document.getElementById('squad').textContent=
+      `⬢ 免費地形剩 ${freeLeft} 塊`+(freeLeft?'':`(超額每塊 -${CFG.extraCost} 開局源能)`)+
+      ` | 開局源能:${Math.floor(state.pE)} | 障礙=羈絆格 ◈=產能 ▲=射程+25%`;
+    document.getElementById('energy').textContent='源能: '+Math.floor(state.pE);
+    if(state.setupTime<=0) startBattle();
+    return;
+  }
+  if(state.phase!=='battle') return;
+  // 資源地板加成:每塊 +0.5/秒
+  let pInc=0,eInc=0;
+  for(let r=0;r<ROWS;r++)for(let c=0;c<COLS;c++){
+    const g=grid[r][c];
+    if(g.terrain==='energy'){ if(g.tOwner==='P') pInc+=0.5; else if(g.tOwner==='E') eInc+=0.5; }
+  }
+  state.pE=Math.min(E_CAP,state.pE+(CFG.regen+pInc)*dt);
+  state.eE=Math.min(E_CAP,state.eE+(CFG.regen+eInc)*dt);
+  aiThink(dt);
+
+  // 出擊隊列:小隊依序間隔放出
+  if(state.launchQueue.length){
+    state.launchTimer-=dt;
+    if(state.launchTimer<=0){
+      const it=state.launchQueue.shift();
+      summon('P',it.type,it.mods,true); // 打牌時已付費
+      state.launchTimer=0.35;
+    }
+  }
+
+  // 怪物移動
+  const now=performance.now()/1000;
+  for(const k of state.creeps){
+    if(!k.fly&&k.ver!==pathVersion){ // 地圖變了 → 重算路徑(從最近格)
+      const cur=nearestCell(k.x,k.y);
+      const np=bfs(cur,k.to);
+      if(np){ k.path=np; k.idx=1; }
+      k.ver=pathVersion;
+    }
+    const C=CREEPS[k.type];
+    let spd=C.speed*(k.spdMul||1);
+    if(now<k.slowUntil) spd*=0.5;
+    if(k.pulseUntil&&now<k.pulseUntil) spd*=0.3;
+    if(!k.fly){ // 飛行怪無視地面效果
+      const cell=nearestCell(k.x,k.y);
+      const t=grid[cell.r][cell.c].terrain;
+      if((t==='slowP'&&k.owner==='E')||(t==='slowE'&&k.owner==='P')) spd*=0.5;
+    }
+    if(k.idx<k.path.length){
+      const tgt=hexCenter(k.path[k.idx].r,k.path[k.idx].c);
+      const dx=tgt.x-k.x, dy=tgt.y-k.y, d=Math.hypot(dx,dy);
+      if(d<2){ k.idx++; } else { k.x+=dx/d*spd*dt; k.y+=dy/d*spd*dt; }
+    } else { // 到達敵方主堡
+      const d=k.dmg!=null?k.dmg:C.dmg;
+      if(k.owner==='P'){ state.eHP-=d; } else { state.pHP-=d; }
+      const bp=hexCenter(k.to.r,k.to.c);
+      addFloat(bp.x,bp.y-20,`-${d}`,'#ff5b5b');
+      state.shots.push({ring:true,x:bp.x,y:bp.y,t:0.4,color:'#ff5b5b'});
+      k.hp=0; k.reached=true;
+    }
+  }
+  // 塔攻擊
+  for(let r=0;r<ROWS;r++)for(let c=0;c<COLS;c++){
+    const tw=grid[r][c].tower; if(!tw||tw.tmp) continue;
+    tw.cd-=dt; if(tw.cd>0) continue;
+    const T=TOWERS[tw.type]; const p=hexCenter(r,c);
+    const rg=T.range*(tw.rangeMul||1);
+    let best=null,bd=1e9;
+    for(const k of state.creeps){
+      if(k.hp<=0||k.owner===tw.owner) continue;
+      const d=Math.hypot(k.x-p.x,k.y-p.y);
+      if(d<=rg&&d<bd){ bd=d; best=k; }
+    }
+    if(best){
+      tw.cd=T.rate;
+      hitCreep(best,T.dmg*tw.buff,tw);
+      if(T.slow) best.slowUntil=performance.now()/1000+T.slowDur;
+      if(T.aoe){ // 爆裂塔:濺射目標周圍的敵怪
+        for(const k of state.creeps){
+          if(k===best||k.hp<=0||k.owner===tw.owner) continue;
+          if(Math.hypot(k.x-best.x,k.y-best.y)<=T.aoe) hitCreep(k,T.dmg*tw.buff*0.6,tw);
+        }
+      }
+      state.shots.push({x1:p.x,y1:p.y,x2:best.x,y2:best.y,t:0.12,color:T.color});
+    }
+  }
+  state.creeps=state.creeps.filter(k=>k.hp>0);
+  for(const s of state.shots) s.t-=dt;
+  state.shots=state.shots.filter(s=>s.t>0);
+  for(const f of state.floats) f.t-=dt;
+  state.floats=state.floats.filter(f=>f.t>0);
+  state.pulseCd=Math.max(0,state.pulseCd-dt);
+  state.ePulseCd=Math.max(0,state.ePulseCd-dt);
+  // 脈衝按鈕冷卻顯示
+  const pb=document.getElementById('tb_pulse');
+  if(pb) pb.textContent=state.pulseCd>0?`⚡ 過載脈衝 ${Math.ceil(state.pulseCd)}s`:'⚡ 過載脈衝 就緒';
+  // 勝負
+  if(state.pHP<=0||state.eHP<=0){
+    state.phase='over';
+    state.winner=state.pHP<=0?'E':'P';
+    document.getElementById('phase').textContent=state.winner==='P'?'🏆 你贏了!':'💀 你輸了…';
+    makeToolbar();
+  }
+  // 同步手牌上的通膨塔價
+  if(state.hand) state.hand.forEach((cd,i)=>{
+    const b=document.getElementById('tb_card'+i);
+    if(b) b.textContent=cardLabel(cd);
+  });
+  // 待命區顯示
+  {
+    const counts={};
+    state.staged.forEach(t=>counts[t]=(counts[t]||0)+1);
+    const syn=computeSynergy(state.staged);
+    const parts=Object.entries(counts).map(([t,n])=>`${CREEPS[t].name}×${n}`);
+    document.getElementById('squad').textContent = state.staged.length
+      ? `🏕 待命區:${parts.join('、')}${syn.names.length?'  ⚡羈絆:'+syn.names.join('+'):''}`
+      : '🏕 待命區:(空)──打出怪物卡會先進到這裡,按「出擊」整隊出發';
+    // 羈絆圖鑑:即時進度,湊齊亮起
+    document.getElementById('synbook').innerHTML=SYNERGIES.map(s=>{
+      const prog=Object.entries(s.need)
+        .map(([t,n])=>`${CREEPS[t].name} ${Math.min(counts[t]||0,n)}/${n}`).join('+');
+      const on=Object.entries(s.need).every(([t,n])=>(counts[t]||0)>=n);
+      return `<span class="syn${on?' on':''}"><b>${s.name}</b> ${prog} → ${s.effect}</span>`;
+    }).join('');
+  }
+  document.getElementById('pHP').textContent=Math.max(0,Math.ceil(state.pHP));
+  document.getElementById('eHP').textContent=Math.max(0,Math.ceil(state.eHP));
+  document.getElementById('energy').textContent='源能: '+Math.floor(state.pE);
+}
+function hitCreep(k,dmg,tw){
+  k.hp-=dmg;
+  if(k.hp<=0&&!k.reached&&!k.bountyGiven){
+    k.bountyGiven=true;
+    const b=Math.round(CREEPS[k.type].cost*CFG.bounty*(k.bountyMul||1));
+    if(tw.owner==='P') state.pE=Math.min(E_CAP,state.pE+b);
+    else state.eE=Math.min(E_CAP,state.eE+b);
+    if(k.owner==='E') aiLossScore+=0.6; // AI 記住自己被收懸賞,變得更謹慎
+    addFloat(k.x,k.y,`+${b}`,tw.owner==='P'?'#ffd54f':'#ff9a7a'); // 懸賞飄字
+    state.shots.push({ring:true,x:k.x,y:k.y,t:0.35,color:CREEPS[k.type].color}); // 擊殺光圈
+  }
+}
+function nearestCell(x,y){
+  let best={r:0,c:0},bd=1e9;
+  for(let r=0;r<ROWS;r++)for(let c=0;c<COLS;c++){
+    const p=hexCenter(r,c); const d=(p.x-x)**2+(p.y-y)**2;
+    if(d<bd){bd=d;best={r,c};}
+  }
+  return best;
+}
+
+//==================== 繪圖 ====================
+const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
+let hover=null;
+function hexPath(x,y){
+  ctx.beginPath();
+  for(let i=0;i<6;i++){
+    const a=Math.PI/180*(60*i-30);
+    const px=x+HEX*Math.cos(a)*0.94, py=y+HEX*Math.sin(a)*0.94;
+    i?ctx.lineTo(px,py):ctx.moveTo(px,py);
+  }
+  ctx.closePath();
+}
+function draw(){
+  ctx.clearRect(0,0,cv.width,cv.height);
+  const half=Math.floor(COLS/2);
+  // 預覽雙方各自的進攻路徑(可能是不同的等長最短路)
+  const pathP=bfs(P_BASE,E_BASE)||[], pathE=bfs(E_BASE,P_BASE)||[];
+  const onPathP=new Set(pathP.map(p=>p.r*COLS+p.c));
+  const onPathE=new Set(pathE.map(p=>p.r*COLS+p.c));
+  for(let r=0;r<ROWS;r++)for(let c=0;c<COLS;c++){
+    const {x,y}=hexCenter(r,c); const g=grid[r][c];
+    hexPath(x,y);
+    const k=r*COLS+c;
+    let fill = c<half ? '#141b29' : '#1d1622';
+    if(onPathP.has(k)&&onPathE.has(k)) fill='#2c2a4a';      // 重疊路段
+    else if(onPathP.has(k)) fill='#1a2f50';                  // 我方怪走的路(藍)
+    else if(onPathE.has(k)) fill='#451f28';                  // 敵方怪走的路(紅)
+    if(g.terrain==='block') fill='#3a4252';
+    if(g.terrain==='energy') fill='#4a3d1d';
+    if(g.terrain==='high') fill='#46506b';
+    if(g.terrain==='slowP') fill='#1d4a52';
+    if(g.terrain==='slowE') fill='#52301d';
+    ctx.fillStyle=fill; ctx.fill();
+    ctx.strokeStyle='#252e40'; ctx.lineWidth=1; ctx.stroke();
+    if(g.terrain==='energy'||g.terrain==='high'){
+      ctx.fillStyle=g.terrain==='energy'?'#ffd54f':'#aebfe8';
+      ctx.font='12px sans-serif'; ctx.textAlign='center';
+      ctx.fillText(g.terrain==='energy'?'◈':'▲',x,y+4);
+    }
+    if(g.base){
+      ctx.fillStyle=g.base==='P'?'#3b6fd4':'#d44b4b';
+      hexPath(x,y); ctx.fill();
+      ctx.fillStyle='#fff'; ctx.font='bold 13px sans-serif'; ctx.textAlign='center';
+      ctx.fillText(g.base==='P'?'堡':'敵',x,y+5);
+    }
+    if(g.tower&&!g.tower.tmp){
+      const T=TOWERS[g.tower.type];
+      ctx.beginPath(); ctx.arc(x,y,10,0,7); ctx.fillStyle=T.color; ctx.fill();
+      ctx.strokeStyle=g.tower.owner==='P'?'#6ea8ff':'#ff7a7a'; ctx.lineWidth=2.5; ctx.stroke();
+      if(g.tower.buff>1){ ctx.fillStyle='#ffd54f'; ctx.font='10px sans-serif'; ctx.fillText('★',x,y-13); }
+    }
+  }
+  // hover 高亮 + 射程預覽
+  if(hover&&state.phase!=='over'){
+    const {x,y}=hexCenter(hover.r,hover.c);
+    hexPath(x,y); ctx.strokeStyle='#7fe3a8'; ctx.lineWidth=2; ctx.stroke();
+    let T=null;
+    const m=/^card(\d)$/.exec(state.tool||'');
+    if(m&&state.hand){ const cd=state.hand[+m[1]]; if(cd&&cd.kind==='tower') T=TOWERS[cd.id]; }
+    if(T&&state.phase==='battle'){
+      ctx.beginPath(); ctx.arc(x,y,T.range,0,7);
+      ctx.strokeStyle=T.color+'66'; ctx.lineWidth=1.5; ctx.stroke();
+    }
+  }
+  // 怪物
+  for(const k of state.creeps){
+    const C=CREEPS[k.type];
+    ctx.beginPath(); ctx.arc(k.x,k.y,C.r,0,7); ctx.fillStyle=C.color; ctx.fill();
+    ctx.strokeStyle=k.owner==='P'?'#6ea8ff':'#ff7a7a'; ctx.lineWidth=2; ctx.stroke();
+    if(k.fly){ // 飛行怪:外圈虛線
+      ctx.beginPath(); ctx.setLineDash([3,3]); ctx.arc(k.x,k.y,C.r+4,0,7);
+      ctx.strokeStyle='#cfeaff'; ctx.lineWidth=1; ctx.stroke(); ctx.setLineDash([]);
+    }
+    // 血條
+    ctx.fillStyle='#000a'; ctx.fillRect(k.x-11,k.y-C.r-8,22,4);
+    ctx.fillStyle='#7fe3a8'; ctx.fillRect(k.x-11,k.y-C.r-8,22*k.hp/k.maxhp,4);
+  }
+  // 特效:子彈線/擊殺光圈/脈衝波
+  for(const s of state.shots){
+    if(s.pulse){
+      const k=1-s.t/0.45;
+      ctx.beginPath(); ctx.arc(s.x,s.y,PULSE.radius*k,0,7);
+      ctx.strokeStyle=s.color; ctx.lineWidth=3; ctx.globalAlpha=s.t/0.45; ctx.stroke(); ctx.globalAlpha=1;
+    }else if(s.ring){
+      const k=1-s.t/0.35;
+      ctx.beginPath(); ctx.arc(s.x,s.y,8+18*k,0,7);
+      ctx.strokeStyle=s.color; ctx.lineWidth=2; ctx.globalAlpha=s.t/0.35; ctx.stroke(); ctx.globalAlpha=1;
+    }else{
+      ctx.beginPath(); ctx.moveTo(s.x1,s.y1); ctx.lineTo(s.x2,s.y2);
+      ctx.strokeStyle=s.color; ctx.lineWidth=2; ctx.globalAlpha=s.t/0.12; ctx.stroke(); ctx.globalAlpha=1;
+    }
+  }
+  // 飄字
+  for(const f of state.floats){
+    ctx.globalAlpha=Math.min(1,f.t);
+    ctx.fillStyle=f.color; ctx.font='bold 14px sans-serif'; ctx.textAlign='center';
+    ctx.fillText(f.text,f.x,f.y-(1.1-f.t)*28);
+    ctx.globalAlpha=1;
+  }
+}
+
+//==================== 輸入 ====================
+cv.addEventListener('mousemove',e=>{
+  const rect=cv.getBoundingClientRect();
+  hover=nearestCell(e.clientX-rect.left,e.clientY-rect.top);
+});
+cv.addEventListener('mouseleave',()=>hover=null);
+cv.addEventListener('click',e=>{
+  const rect=cv.getBoundingClientRect();
+  const cell=nearestCell(e.clientX-rect.left,e.clientY-rect.top);
+  if(state.phase==='setup') setupClick(cell.r,cell.c);
+  else if(state.phase==='battle') battleClick(cell.r,cell.c);
+});
+
+//==================== 主迴圈 ====================
+makeToolbar();
+msg('佈局階段:在左半場放置障礙地板,設計你的迷宮。記得留路給自己的怪走!');
+let last=performance.now();
+function loop(t){
+  const dt=Math.min(0.05,(t-last)/1000); last=t;
+  update(dt); draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
