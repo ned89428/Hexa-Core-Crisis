@@ -24,6 +24,10 @@
   .syn b { color:#9fb4d8; }
   .syn.on { border-color:#7fe3a8; background:#1c3326; color:#cfe3a8; }
   .syn.on b { color:#7fe3a8; }
+  #perkbar { margin-top:6px; display:flex; gap:8px; flex-wrap:wrap; justify-content:center;
+             align-items:center; font-size:13px; color:#c8b06a; min-height:30px; }
+  #perkbar button { border-color:#c8a23e; background:#2a2410; color:#ffd54f; }
+  #perkbar button:hover { background:#3d3418; }
   #energy { color:#7fe3a8; font-weight:bold; }
   #panel { margin-top:8px; background:#161d2b; border:1px solid #2a3242; border-radius:8px;
            padding:8px 14px; display:flex; gap:18px; flex-wrap:wrap; font-size:12px; color:#9fb4d8; }
@@ -44,6 +48,7 @@
   <div id="toolbar"></div>
   <div id="squad">🏕 待命區:(空)</div>
   <div id="synbook"></div>
+  <div id="perkbar"></div>
   <div id="msg"></div>
   <div id="panel"></div>
 </div>
@@ -63,6 +68,20 @@ const CFG={
   extraCost:15,   // 超過免費額度後,每塊地形扣多少開局源能
   creepScale:0.10,// 怪物時間成長:每分鐘血量/傷害 +10%(反後期塔海僵局)
 };
+// 局內永久強化(Rogue-lite build 核心):定期三選一,效果疊加整局
+const PERKS=[
+  {id:'eco',  name:'戰爭經濟', desc:'回能 +1.5/秒',      apply:m=>m.regen+=1.5},
+  {id:'bounty',name:'賞金獵人', desc:'懸賞收入 +60%',     apply:m=>m.bountyGain*=1.6},
+  {id:'rate', name:'超頻火控', desc:'全塔攻速 +25%',     apply:m=>m.towerRate*=1.25},
+  {id:'range',name:'長程光學', desc:'全塔射程 +20%',     apply:m=>m.towerRange*=1.2},
+  {id:'dmg',  name:'重火藥',   desc:'全塔傷害 +20%',     apply:m=>m.towerDmg*=1.2},
+  {id:'hp',   name:'基因強化', desc:'我方怪物血量 +25%', apply:m=>m.creepHp*=1.25},
+  {id:'spd',  name:'腎上腺素', desc:'我方怪物速度 +20%', apply:m=>m.creepSpd*=1.2},
+  {id:'air',  name:'空優塗裝', desc:'飛行怪血量 +50%',   apply:m=>m.flyHp*=1.5},
+];
+function defaultMods(){ return {regen:0,bountyGain:1,towerRate:1,towerRange:1,towerDmg:1,creepHp:1,creepSpd:1,flyHp:1}; }
+function modsOf(owner){ return owner==='P'?state.pMods:state.eMods; }
+const PERK_FIRST=10, PERK_INTERVAL=50; // 開戰10秒第一次,之後每50秒
 // 主動技能:過載脈衝(點地圖施放,範圍減速+傷害)
 const PULSE={cd:25,radius:110,dur:2.5,dmg:10};
 const REFRESH_COST=20; // 刷新整手牌的費用
@@ -190,6 +209,8 @@ let state={
   setupTime:60, tool:'block', creeps:[], shots:[], winner:null,
   hand:null, staged:[], launchQueue:[], launchTimer:0, battleStart:0,
   pulseCd:0, ePulseCd:0, floats:[],
+  pMods:defaultMods(), eMods:defaultMods(), pPerks:[], ePerks:[],
+  perkOffer:null, perkTimer:PERK_FIRST,
 };
 function addFloat(x,y,text,color){
   state.floats.push({x,y,text,color,t:1.1});
@@ -321,6 +342,7 @@ function startBattle(){
   aiSetup();
   state.phase='battle'; state.tool=''; state.battleStart=performance.now();
   state.hand=[drawCard(),drawCard(),drawCard(),drawCard(),drawCard()];
+  renderPerkbar();
   pathVersion++;
   document.getElementById('phase').textContent='⚔ 戰鬥中';
   makeToolbar();
@@ -328,6 +350,38 @@ function startBattle(){
 }
 
 //==================== 戰鬥階段:建造/召喚 ====================
+//==================== 強化(Perk)系統 ====================
+function pickPerkOffer(){
+  const pool=[...PERKS];
+  const out=[];
+  for(let i=0;i<3&&pool.length;i++) out.push(pool.splice(Math.floor(Math.random()*pool.length),1)[0]);
+  return out;
+}
+function choosePerk(i){
+  const p=state.perkOffer[i];
+  p.apply(state.pMods);
+  state.pPerks.push(p.name);
+  state.perkOffer=null;
+  renderPerkbar();
+  msg(`🜲 獲得強化:${p.name}(${p.desc})`);
+}
+function renderPerkbar(){
+  const bar=document.getElementById('perkbar');
+  bar.innerHTML='';
+  if(state.perkOffer){
+    const t=document.createElement('span'); t.textContent='🜲 選擇強化:'; bar.appendChild(t);
+    state.perkOffer.forEach((p,i)=>{
+      const b=document.createElement('button');
+      b.textContent=`${p.name} — ${p.desc}`;
+      b.onclick=()=>choosePerk(i);
+      bar.appendChild(b);
+    });
+  }else if(state.phase==='battle'){
+    const t=document.createElement('span');
+    t.innerHTML=`🜲 已獲強化:${state.pPerks.join('、')||'(無)'} | 下次強化 <span id="perkNext"></span>`;
+    bar.appendChild(t);
+  }
+}
 function refreshHand(){
   if(state.pE<REFRESH_COST) return msg('源能不足,無法刷新');
   state.pE-=REFRESH_COST;
@@ -436,9 +490,10 @@ function summon(owner,type,mods,paid){
   const path=C.fly?[from,to]:bfs(from,to); // 飛行怪直線飛越,無視迷宮
   if(!path) return;
   const p0=hexCenter(from.r,from.c);
-  const hp=Math.round(C.hp*tMul*(mods.hpMul||1));
+  const om=modsOf(owner);
+  const hp=Math.round(C.hp*tMul*(mods.hpMul||1)*om.creepHp*(C.fly?om.flyHp:1));
   state.creeps.push({owner,type,hp,maxhp:hp,x:p0.x,y:p0.y,
-    dmg:Math.round(C.dmg*tMul),spdMul:mods.spdMul||1,bountyMul:mods.bountyMul||1,
+    dmg:Math.round(C.dmg*tMul),spdMul:(mods.spdMul||1)*om.creepSpd,bountyMul:mods.bountyMul||1,
     path,idx:1,slowUntil:0,ver:pathVersion,from,to,fly:!!C.fly});
 }
 
@@ -561,8 +616,22 @@ function update(dt){
     const g=grid[r][c];
     if(g.terrain==='energy'){ if(g.tOwner==='P') pInc+=0.5; else if(g.tOwner==='E') eInc+=0.5; }
   }
-  state.pE=Math.min(E_CAP,state.pE+(CFG.regen+pInc)*dt);
-  state.eE=Math.min(E_CAP,state.eE+(CFG.regen+eInc)*dt);
+  state.pE=Math.min(E_CAP,state.pE+(CFG.regen+pInc+state.pMods.regen)*dt);
+  state.eE=Math.min(E_CAP,state.eE+(CFG.regen+eInc+state.eMods.regen)*dt);
+  // 強化三選一:定期出現;AI 同步隨機拿一個
+  if(!state.perkOffer){
+    state.perkTimer-=dt;
+    if(state.perkTimer<=0){
+      state.perkOffer=pickPerkOffer();
+      const ap=PERKS[Math.floor(Math.random()*PERKS.length)];
+      ap.apply(state.eMods); state.ePerks.push(ap.name);
+      state.perkTimer=PERK_INTERVAL;
+      renderPerkbar();
+    }else{
+      const el=document.getElementById('perkNext');
+      if(el) el.textContent=Math.ceil(state.perkTimer)+'s';
+    }
+  }
   aiThink(dt);
 
   // 出擊隊列:小隊依序間隔放出
@@ -611,7 +680,8 @@ function update(dt){
     const tw=grid[r][c].tower; if(!tw||tw.tmp) continue;
     tw.cd-=dt; if(tw.cd>0) continue;
     const T=TOWERS[tw.type]; const p=hexCenter(r,c);
-    const rg=T.range*(tw.rangeMul||1);
+    const om=modsOf(tw.owner);
+    const rg=T.range*(tw.rangeMul||1)*om.towerRange;
     let best=null,bd=1e9;
     for(const k of state.creeps){
       if(k.hp<=0||k.owner===tw.owner) continue;
@@ -619,13 +689,13 @@ function update(dt){
       if(d<=rg&&d<bd){ bd=d; best=k; }
     }
     if(best){
-      tw.cd=T.rate;
-      hitCreep(best,T.dmg*tw.buff,tw);
+      tw.cd=T.rate/om.towerRate;
+      hitCreep(best,T.dmg*tw.buff*om.towerDmg,tw);
       if(T.slow) best.slowUntil=performance.now()/1000+T.slowDur;
       if(T.aoe){ // 爆裂塔:濺射目標周圍的敵怪
         for(const k of state.creeps){
           if(k===best||k.hp<=0||k.owner===tw.owner) continue;
-          if(Math.hypot(k.x-best.x,k.y-best.y)<=T.aoe) hitCreep(k,T.dmg*tw.buff*0.6,tw);
+          if(Math.hypot(k.x-best.x,k.y-best.y)<=T.aoe) hitCreep(k,T.dmg*tw.buff*om.towerDmg*0.6,tw);
         }
       }
       state.shots.push({x1:p.x,y1:p.y,x2:best.x,y2:best.y,t:0.12,color:T.color});
@@ -680,10 +750,11 @@ function hitCreep(k,dmg,tw){
   if(k.hp<=0&&!k.reached&&!k.bountyGiven){
     k.bountyGiven=true;
     const b=Math.round(CREEPS[k.type].cost*CFG.bounty*(k.bountyMul||1));
-    if(tw.owner==='P') state.pE=Math.min(E_CAP,state.pE+b);
-    else state.eE=Math.min(E_CAP,state.eE+b);
+    const b2=Math.round(b*modsOf(tw.owner).bountyGain);
+    if(tw.owner==='P') state.pE=Math.min(E_CAP,state.pE+b2);
+    else state.eE=Math.min(E_CAP,state.eE+b2);
     if(k.owner==='E') aiLossScore+=0.6; // AI 記住自己被收懸賞,變得更謹慎
-    addFloat(k.x,k.y,`+${b}`,tw.owner==='P'?'#ffd54f':'#ff9a7a'); // 懸賞飄字
+    addFloat(k.x,k.y,`+${b2}`,tw.owner==='P'?'#ffd54f':'#ff9a7a'); // 懸賞飄字
     state.shots.push({ring:true,x:k.x,y:k.y,t:0.35,color:CREEPS[k.type].color}); // 擊殺光圈
   }
 }
