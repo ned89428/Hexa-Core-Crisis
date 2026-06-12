@@ -68,20 +68,26 @@ const CFG={
   extraCost:15,   // 超過免費額度後,每塊地形扣多少開局源能
   creepScale:0.10,// 怪物時間成長:每分鐘血量/傷害 +10%(反後期塔海僵局)
 };
-// 局內永久強化(Rogue-lite build 核心):定期三選一,效果疊加整局
+// 核心模組(Rogue-lite build 核心):5槽上限,雙方同步看同一組三選一,對手選了什麼看得到(情報戰)
+// 設計主軸:模組強化「羈絆」,讓玩家往特定兵種組合傾斜,拼出 build 身分
 const PERKS=[
-  {id:'eco',  name:'戰爭經濟', desc:'回能 +1.5/秒',      apply:m=>m.regen+=1.5},
-  {id:'bounty',name:'賞金獵人', desc:'懸賞收入 +60%',     apply:m=>m.bountyGain*=1.6},
-  {id:'rate', name:'超頻火控', desc:'全塔攻速 +25%',     apply:m=>m.towerRate*=1.25},
-  {id:'range',name:'長程光學', desc:'全塔射程 +20%',     apply:m=>m.towerRange*=1.2},
-  {id:'dmg',  name:'重火藥',   desc:'全塔傷害 +20%',     apply:m=>m.towerDmg*=1.2},
-  {id:'hp',   name:'基因強化', desc:'我方怪物血量 +25%', apply:m=>m.creepHp*=1.25},
-  {id:'spd',  name:'腎上腺素', desc:'我方怪物速度 +20%', apply:m=>m.creepSpd*=1.2},
-  {id:'air',  name:'空優塗裝', desc:'飛行怪血量 +50%',   apply:m=>m.flyHp*=1.5},
+  {id:'eco',   name:'戰爭經濟', desc:'回能 +1.5/秒',                 apply:m=>m.regen+=1.5},
+  {id:'bounty',name:'賞金獵人', desc:'懸賞收入 +60%',                apply:m=>m.bountyGain*=1.6},
+  {id:'dmg',   name:'重火藥',   desc:'全塔傷害 +20%',                apply:m=>m.towerDmg*=1.2},
+  {id:'rate',  name:'超頻火控', desc:'全塔攻速 +25%',                apply:m=>m.towerRate*=1.25},
+  {id:'drill', name:'精銳編制', desc:'所有羈絆需求 -1 隻',           apply:m=>m.synNeed+=1},
+  {id:'amp',   name:'羈絆共鳴', desc:'所有羈絆效果 +50%',            apply:m=>m.synPower+=0.5},
+  {id:'gale',  name:'颶風核心', desc:'疾風陣效果翻倍',               apply:m=>m.synX['疾風陣']=(m.synX['疾風陣']||1)*2},
+  {id:'wall',  name:'不動明王', desc:'鐵壁陣效果翻倍',               apply:m=>m.synX['鐵壁陣']=(m.synX['鐵壁陣']||1)*2},
+  {id:'sky',   name:'空域霸權', desc:'空襲編隊效果翻倍',             apply:m=>m.synX['空襲編隊']=(m.synX['空襲編隊']||1)*2},
+  {id:'gourd', name:'葫蘆秘術', desc:'葫蘆小隊效果翻倍(懸賞歸零)', apply:m=>m.synX['葫蘆小隊']=(m.synX['葫蘆小隊']||1)*2},
+  {id:'refund',name:'連鎖補給', desc:'出擊時每個生效羈絆 +25 源能',  apply:m=>m.launchRefund+=25},
+  {id:'terra', name:'戰地工程', desc:'之後新建的塔,地形加成翻倍',   apply:m=>m.terraBoost*=2},
 ];
-function defaultMods(){ return {regen:0,bountyGain:1,towerRate:1,towerRange:1,towerDmg:1,creepHp:1,creepSpd:1,flyHp:1}; }
+function defaultMods(){ return {regen:0,bountyGain:1,towerRate:1,towerRange:1,towerDmg:1,creepHp:1,creepSpd:1,flyHp:1,
+  synNeed:0,synPower:1,synX:{},launchRefund:0,terraBoost:1}; }
 function modsOf(owner){ return owner==='P'?state.pMods:state.eMods; }
-const PERK_FIRST=10, PERK_INTERVAL=50; // 開戰10秒第一次,之後每50秒
+const PERK_FIRST=10, PERK_INTERVAL=50, PERK_SLOTS=5; // 開戰10秒第一次,之後每50秒,共5輪(=5槽)
 // 主動技能:過載脈衝(點地圖施放,範圍減速+傷害)
 const PULSE={cd:25,radius:110,dur:2.5,dmg:10};
 const REFRESH_COST=20; // 刷新整手牌的費用
@@ -118,20 +124,29 @@ function makeDraft(){
 }
 // 羈絆定義(出擊時依小隊組成結算)
 const SYNERGIES=[
-  {name:'疾風陣',  need:{fast:3},        effect:'全隊速度+25%',        apply:o=>o.spdMul*=1.25},
-  {name:'鐵壁陣',  need:{tank:3},        effect:'全隊血量+30%',        apply:o=>o.hpMul*=1.3},
-  {name:'葫蘆小隊',need:{fast:3,tank:3}, effect:'懸賞減半(對手只拿一半)',apply:o=>o.bountyMul*=0.5},
-  {name:'空襲編隊',need:{wing:2},        effect:'全隊血量+20%',        apply:o=>o.hpMul*=1.2},
+  {name:'疾風陣',  need:{fast:3},        effect:'全隊速度+25%',        fx:{spdMul:1.25}},
+  {name:'鐵壁陣',  need:{tank:3},        effect:'全隊血量+30%',        fx:{hpMul:1.3}},
+  {name:'葫蘆小隊',need:{fast:3,tank:3}, effect:'懸賞減半(對手只拿一半)',fx:{bountyMul:0.5}},
+  {name:'空襲編隊',need:{wing:2},        effect:'全隊血量+20%',        fx:{hpMul:1.2}},
 ];
-function computeSynergy(staged){
+// owner 給定時套用該方的核心模組:synNeed(需求-N)、synPower(全羈絆增幅)、synX(單一羈絆翻倍)
+function computeSynergy(staged,owner){
+  const om=owner?modsOf(owner):null;
   const cnt={}; staged.forEach(t=>cnt[t]=(cnt[t]||0)+1);
   const out={hpMul:1,spdMul:1,bountyMul:1,names:[]};
   for(const s of SYNERGIES){
-    if(Object.entries(s.need).every(([t,n])=>(cnt[t]||0)>=n)){
-      s.apply(out); out.names.push(s.name);
+    const reduce=om?om.synNeed:0;
+    if(Object.entries(s.need).every(([t,n])=>(cnt[t]||0)>=Math.max(1,n-reduce))){
+      const power=(om?om.synPower:1)*((om&&om.synX[s.name])||1);
+      for(const [k,v] of Object.entries(s.fx)) out[k]*=Math.max(0,1+(v-1)*power);
+      out.names.push(s.name);
     }
   }
   return out;
+}
+function synNeedOf(s,owner){ // 顯示用:套用「精銳編制」後的實際需求
+  const reduce=modsOf(owner).synNeed;
+  return Object.fromEntries(Object.entries(s.need).map(([t,n])=>[t,Math.max(1,n-reduce)]));
 }
 const TOWERS={
   rapid: {name:"速射塔",cost:40,dmg:6, rate:0.35,range:95, color:"#5ad1e6"},
@@ -210,7 +225,7 @@ let state={
   hand:null, staged:[], launchQueue:[], launchTimer:0, battleStart:0,
   pulseCd:0, ePulseCd:0, floats:[],
   pMods:defaultMods(), eMods:defaultMods(), pPerks:[], ePerks:[],
-  perkOffer:null, perkTimer:PERK_FIRST,
+  perkOffer:null, perkTimer:PERK_FIRST, aiPick:null,
 };
 function addFloat(x,y,text,color){
   state.floats.push({x,y,text,color,t:1.1});
@@ -283,7 +298,7 @@ function makeToolbar(){
       });
       b.style.borderColor=cd.kind==='creep'?'#8a6de0':(cd.kind==='tower'?'#5ad1e6':'#7fb88a');
     });
-    const syn=computeSynergy(state.staged);
+    const syn=computeSynergy(state.staged,'P');
     const synTxt=syn.names.length?' ['+syn.names.join('+')+']':'';
     const lb=add('launch',`⚔ 出擊 (${state.staged.length})${synTxt}`,launchSquad);
     lb.style.borderColor='#7fe3a8';
@@ -350,12 +365,19 @@ function startBattle(){
 }
 
 //==================== 戰鬥階段:建造/召喚 ====================
-//==================== 強化(Perk)系統 ====================
+//==================== 核心模組(Perk)系統 ====================
+// 雙方同步看到「同一組」三選一(公平,且對手選擇=情報);各自最多 5 槽
 function pickPerkOffer(){
-  const pool=[...PERKS];
+  const pool=PERKS.filter(p=>!state.pPerks.includes(p.name)||!state.ePerks.includes(p.name));
   const out=[];
   for(let i=0;i<3&&pool.length;i++) out.push(pool.splice(Math.floor(Math.random()*pool.length),1)[0]);
   return out;
+}
+function aiPickPerk(offer){
+  // AI 簡單偏好:有羈絆/經濟模組就優先,否則隨機
+  const prio=['amp','drill','eco','bounty'];
+  const hit=offer.filter(p=>prio.includes(p.id));
+  return (hit.length?hit:offer)[Math.floor(Math.random()*(hit.length?hit.length:offer.length))];
 }
 function choosePerk(i){
   const p=state.perkOffer[i];
@@ -363,22 +385,28 @@ function choosePerk(i){
   state.pPerks.push(p.name);
   state.perkOffer=null;
   renderPerkbar();
-  msg(`🜲 獲得強化:${p.name}(${p.desc})`);
+  makeToolbar();
+  msg(`🜲 模組裝載:${p.name}(${p.desc})${state.aiPick?` | 對手選了:${state.aiPick}`:''}`);
 }
 function renderPerkbar(){
   const bar=document.getElementById('perkbar');
   bar.innerHTML='';
   if(state.perkOffer){
-    const t=document.createElement('span'); t.textContent='🜲 選擇強化:'; bar.appendChild(t);
+    const t=document.createElement('span');
+    t.textContent=`🜲 核心模組三選一(${state.pPerks.length+1}/${PERK_SLOTS})對手也在同一組裡挑:`;
+    bar.appendChild(t);
     state.perkOffer.forEach((p,i)=>{
       const b=document.createElement('button');
-      b.textContent=`${p.name} — ${p.desc}`;
+      b.textContent=`${p.name} — ${p.desc}`+(state.aiPick===p.name?' 👁(對手已選)':'');
       b.onclick=()=>choosePerk(i);
       bar.appendChild(b);
     });
   }else if(state.phase==='battle'){
     const t=document.createElement('span');
-    t.innerHTML=`🜲 已獲強化:${state.pPerks.join('、')||'(無)'} | 下次強化 <span id="perkNext"></span>`;
+    const mine=state.pPerks.join('、')||'(無)';
+    const theirs=state.ePerks.join('、')||'(無)';
+    const next=state.pPerks.length<PERK_SLOTS?` | 下次模組 <span id="perkNext"></span>`:' | 槽位已滿';
+    t.innerHTML=`🜲 我方模組 ${state.pPerks.length}/${PERK_SLOTS}:${mine} | 敵方:${theirs}${next}`;
     bar.appendChild(t);
   }
 }
@@ -448,10 +476,11 @@ function battleClick(r,c){
       if(!ok) return msg('不能把路完全堵死!');
     }
     state.pE-=cost;
-    g.tower={type:card.id,owner:'P',cd:0,buff:onBlock?1.25:1,rangeMul:onHigh?1.25:1};
+    const tb=state.pMods.terraBoost; // 戰地工程:地形加成翻倍(只影響之後新建的塔)
+    g.tower={type:card.id,owner:'P',cd:0,buff:onBlock?1+0.25*tb:1,rangeMul:onHigh?1+0.25*tb:1};
     pathVersion++;
-    if(onBlock) msg('羈絆!蓋在障礙地板上的塔 傷害+25%');
-    if(onHigh) msg('高台加成!塔射程+25%');
+    if(onBlock) msg(`羈絆!蓋在障礙地板上的塔 傷害+${Math.round(25*tb)}%`);
+    if(onHigh) msg(`高台加成!塔射程+${Math.round(25*tb)}%`);
   }
   state.hand[slot]=makeDraft(); // 用掉的卡消失,改為三選一補牌
   state.tool='';
@@ -464,16 +493,21 @@ function playCard(i){
   state.staged.push(t);
   state.hand[i]=makeDraft();
   makeToolbar();
-  const syn=computeSynergy(state.staged);
+  const syn=computeSynergy(state.staged,'P');
   msg(syn.names.length?`羈絆成形:${syn.names.join('+')}!按「出擊」放出小隊`:`${C.name} 進入待命區(錢已付,死了對手照拿懸賞,想好再出擊)`);
 }
 function launchSquad(){
   if(!state.staged.length) return msg('待命區是空的,先打出手牌');
-  const mods=computeSynergy(state.staged);
+  const mods=computeSynergy(state.staged,'P');
   for(const t of state.staged) state.launchQueue.push({type:t,mods});
   state.staged=[];
+  // 核心模組「連鎖補給」:每個生效羈絆返還源能
+  const refund=state.pMods.launchRefund*mods.names.length;
+  if(refund>0){ state.pE=Math.min(E_CAP,state.pE+refund); }
   makeToolbar();
-  msg(mods.names.length?`出擊!羈絆生效:${mods.names.join('+')}`:'小隊出擊!');
+  msg(mods.names.length
+    ?`出擊!羈絆生效:${mods.names.join('+')}${refund>0?` (連鎖補給 +${refund})`:''}`
+    :'小隊出擊!');
 }
 function summon(owner,type,mods,paid){
   const C=CREEPS[type];
@@ -591,7 +625,8 @@ function aiBuildTower(){
   const pick=prefer.find(t=>towerCost(t,'E')<=state.eE);
   if(!pick) return false;
   state.eE-=towerCost(pick,'E');
-  g.tower={type:pick,owner:'E',cd:0,buff:onBlock?1.25:1,rangeMul:onHigh?1.25:1};
+  const tb=state.eMods.terraBoost;
+  g.tower={type:pick,owner:'E',cd:0,buff:onBlock?1+0.25*tb:1,rangeMul:onHigh?1+0.25*tb:1};
   pathVersion++;
   return true;
 }
@@ -618,13 +653,14 @@ function update(dt){
   }
   state.pE=Math.min(E_CAP,state.pE+(CFG.regen+pInc+state.pMods.regen)*dt);
   state.eE=Math.min(E_CAP,state.eE+(CFG.regen+eInc+state.eMods.regen)*dt);
-  // 強化三選一:定期出現;AI 同步隨機拿一個
-  if(!state.perkOffer){
+  // 核心模組三選一:雙方看同一組;AI 從同組挑一個並亮給玩家看(情報戰)
+  if(!state.perkOffer&&state.pPerks.length<PERK_SLOTS){
     state.perkTimer-=dt;
     if(state.perkTimer<=0){
       state.perkOffer=pickPerkOffer();
-      const ap=PERKS[Math.floor(Math.random()*PERKS.length)];
+      const ap=aiPickPerk(state.perkOffer);
       ap.apply(state.eMods); state.ePerks.push(ap.name);
+      state.aiPick=ap.name;
       state.perkTimer=PERK_INTERVAL;
       renderPerkbar();
     }else{
@@ -728,17 +764,19 @@ function update(dt){
   {
     const counts={};
     state.staged.forEach(t=>counts[t]=(counts[t]||0)+1);
-    const syn=computeSynergy(state.staged);
+    const syn=computeSynergy(state.staged,'P');
     const parts=Object.entries(counts).map(([t,n])=>`${CREEPS[t].name}×${n}`);
     document.getElementById('squad').textContent = state.staged.length
       ? `🏕 待命區:${parts.join('、')}${syn.names.length?'  ⚡羈絆:'+syn.names.join('+'):''}`
       : '🏕 待命區:(空)──打出怪物卡會先進到這裡,按「出擊」整隊出發';
-    // 羈絆圖鑑:即時進度,湊齊亮起
+    // 羈絆圖鑑:即時進度,湊齊亮起;需求/效果會反映已裝載的核心模組
     document.getElementById('synbook').innerHTML=SYNERGIES.map(s=>{
-      const prog=Object.entries(s.need)
+      const need=synNeedOf(s,'P');
+      const prog=Object.entries(need)
         .map(([t,n])=>`${CREEPS[t].name} ${Math.min(counts[t]||0,n)}/${n}`).join('+');
-      const on=Object.entries(s.need).every(([t,n])=>(counts[t]||0)>=n);
-      return `<span class="syn${on?' on':''}"><b>${s.name}</b> ${prog} → ${s.effect}</span>`;
+      const on=Object.entries(need).every(([t,n])=>(counts[t]||0)>=n);
+      const boosted=(state.pMods.synX[s.name]||1)>1||state.pMods.synPower>1;
+      return `<span class="syn${on?' on':''}"><b>${s.name}</b>${boosted?'🜲':''} ${prog} → ${s.effect}</span>`;
     }).join('');
   }
   document.getElementById('pHP').textContent=Math.max(0,Math.ceil(state.pHP));

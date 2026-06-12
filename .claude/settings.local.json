@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__Claude_Preview__preview_start",
+      "PowerShell($html = Get-Content \"C:\\\\Users\\\\ned.wang\\\\Desktop\\\\Hexa-Core Crisis\\\\index.html\" -Raw; $start = $html.IndexOf\\('<script>'\\)+8; $end = $html.IndexOf\\('</script>'\\); $js = $html.Substring\\($start, $end-$start\\); Set-Content -Path \"$env:TEMP\\\\hexa_check.js\" -Value $js -Encoding utf8; node --check \"$env:TEMP\\\\hexa_check.js\")",
+      "PowerShell($html = Get-Content \"C:\\\\Users\\\\ned.wang\\\\Desktop\\\\Hexa-Core Crisis\\\\index.html\" -Raw -Encoding UTF8; $start = $html.IndexOf\\('<script>'\\)+8; $end = $html.IndexOf\\('</script>'\\); $js = $html.Substring\\($start, $end-$start\\); [System.IO.File]::WriteAllText\\(\"$env:TEMP\\\\hexa_check.js\", $js, \\(New-Object System.Text.UTF8Encoding $false\\)\\); node \"$env:TEMP\\\\hexa_run.js\")",
+      "PowerShell(winget install --id GitHub.cli --silent --accept-source-agreements --accept-package-agreements)",
+      "PowerShell($env:PATH += \";C:\\\\Program Files\\\\GitHub CLI\"; gh auth status)"
+    ]
+  }
+}
