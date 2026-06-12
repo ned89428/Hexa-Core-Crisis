@@ -121,10 +121,7 @@ function cardLabel(cd){
   if(cd.kind==='tower') return `🗼 ${TOWERS[cd.id].name} ${towerCost(cd.id,'P')}`;
   return `⬢ ${TILES[cd.id].name} ${TILES[cd.id].cost}`;
 }
-// 用掉卡後不直接補隨機卡,而是給「三選一」(Rogue-lite 的選擇感)
-function makeDraft(){
-  return {draft:[drawCard(),drawCard(),drawCard()]};
-}
+// 補牌即抽即補:即時戰鬥中不打斷節奏,「選擇感」集中在核心模組三選一與♻刷新
 // 羈絆定義(出擊時依小隊組成結算)
 // 羈絆數的是「標籤」不是怪物種類(戰棋式):一隻怪同時餵兩個羈絆
 const SYNERGIES=[
@@ -308,17 +305,7 @@ function makeToolbar(){
     add('go','✓ 完成佈局,開始戰鬥!',startBattle).style.borderColor='#7fe3a8';
   }else if(state.phase==='battle'){
     // 統一手牌:怪=點擊進待命區;塔/地板=選取後點地圖放置(放置才消耗)
-    // 卡位若處於「三選一」狀態,顯示三張候選卡,點選入手
     state.hand.forEach((cd,i)=>{
-      if(cd.draft){
-        cd.draft.forEach((d,j)=>{
-          const b=add('card'+i+'_'+j,'✦ '+cardLabel(d),()=>{
-            state.hand[i]=d; state.tool=''; makeToolbar();
-          });
-          b.style.borderColor='#ffd54f';
-        });
-        return;
-      }
       const b=add('card'+i,cardLabel(cd),()=>{
         if(cd.kind==='creep') playCard(i);
         else setTool('card'+i);
@@ -509,7 +496,7 @@ function battleClick(r,c){
     if(onBlock) msg(`羈絆!蓋在障礙地板上的塔 傷害+${Math.round(25*tb)}%`);
     if(onHigh) msg(`高台加成!塔射程+${Math.round(25*tb)}%`);
   }
-  state.hand[slot]=makeDraft(); // 用掉的卡消失,改為三選一補牌
+  state.hand[slot]=drawCard(); // 用掉即補,不打斷戰鬥節奏
   state.tool='';
   makeToolbar();
 }
@@ -519,7 +506,7 @@ function playCard(i){
   if(state.pE<C.cost) return msg('源能不足');
   state.pE-=C.cost;
   state.staged.push(t);
-  state.hand[i]=makeDraft();
+  state.hand[i]=drawCard();
   makeToolbar();
   const syn=computeSynergy(state.staged,'P');
   msg(syn.names.length?`羈絆成形:${syn.names.join('+')}!按「出擊」放出小隊`:`${C.name} 進入待命區(錢已付,死了對手照拿懸賞,想好再出擊)`);
@@ -795,9 +782,8 @@ function update(dt){
     document.getElementById('phase').textContent=state.winner==='P'?'🏆 你贏了!':'💀 你輸了…';
     makeToolbar();
   }
-  // 同步手牌上的通膨塔價(三選一狀態的卡位跳過)
+  // 同步手牌上的通膨塔價
   if(state.hand) state.hand.forEach((cd,i)=>{
-    if(cd.draft) return;
     const b=document.getElementById('tb_card'+i);
     if(b) b.textContent=cardLabel(cd);
   });
